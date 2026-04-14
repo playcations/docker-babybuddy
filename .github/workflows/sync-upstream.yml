@@ -1,0 +1,77 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.CR_PAT }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/linuxserver/docker-babybuddy.git
+
+      - name: Fetch upstream
+        run: git fetch upstream main
+
+      - name: Check if upstream has new commits
+        id: check
+        run: |
+          BEHIND=$(git rev-list HEAD..upstream/main --count)
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+          if [ "$BEHIND" -eq 0 ]; then
+            echo "Already up to date with upstream."
+          else
+            echo "Upstream is $BEHIND commit(s) ahead."
+          fi
+
+      - name: Attempt merge into main
+        if: steps.check.outputs.behind != '0'
+        id: merge
+        run: |
+          if git merge upstream/main --no-edit; then
+            echo "conflicts=false" >> $GITHUB_OUTPUT
+          else
+            echo "conflicts=true" >> $GITHUB_OUTPUT
+            git merge --abort
+          fi
+
+      - name: Push merge to main
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflicts == 'false'
+        run: git push origin main
+
+      - name: Create PR for conflicting merge
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflicts == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CR_PAT }}
+        run: |
+          git push origin --delete upstream-sync 2>/dev/null || true
+          git checkout -b upstream-sync
+          git merge upstream/main --no-edit || true
+          git add -A
+          git commit -m "chore: merge upstream (conflicts need resolution)"
+          git push origin upstream-sync
+          gh pr create \
+            --title "chore: sync upstream (conflicts — review before merging)" \
+            --body "Automated sync from [linuxserver/docker-babybuddy](https://github.com/linuxserver/docker-babybuddy/commits/main).
+
+          ⚠️ **Merge had conflicts.** Resolve them before merging — the \`Dockerfile\` and/or \`build.yml\` may need adjustments to preserve your customizations." \
+            --base main \
+            --head upstream-sync \
+          || echo "PR already exists"
